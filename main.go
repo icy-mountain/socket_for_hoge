@@ -3,132 +3,129 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"math/rand"
 	"net"
 	"os"
 	"strconv"
 	"time"
 	str "strings"
+
+	// "golang.org/x/net/context"
+)
+
+const (
+	wait = 3
 )
 
 type Client struct {
-	conn     net.Conn
 	idx      int
+	question string
+	flag	 bool
 	incoming chan string
 	outgoing chan string
-	question string
-	Timeout  int
+	end		 chan bool
+	conn     net.Conn
+	ticker	 *time.Ticker
 	reader   *bufio.Reader
 	writer   *bufio.Writer
 }
 
 type Server struct {
-	listener *net.TCPListener
-	clients  []*Client
 	conn     chan net.Conn
 	incoming chan string
 	outgoing chan string
-}
-
-func make_quiz() string {
-	rand.Seed(time.Now().UnixNano())
-	left := rand.Intn(100)
-	right := rand.Intn(100)
-	oper := " + "
-	switch operi := rand.Intn(4); operi {
-	case 1:
-		oper = " - "
-	case 2:
-		oper = " * "
-	case 3:
-		oper = " / "
-		left *= 3
-		right += 1
-	}
-	return strconv.Itoa(left) + oper + strconv.Itoa(right)
-}
-
-func calc_quiz(data string) int {
-	tkn := str.Split(data, " ")
-	left , err := strconv.Atoi(tkn[0])
-	checkError(err, "in calc_quiz: Atoi error!")
-	right , err2 := strconv.Atoi(tkn[2])
-	checkError(err2, "in calc_quiz: Atoi error!")
-	ans := left + right
-	switch tkn[1] {
-	case "-":
-		ans = left - right
-	case "*":
-		ans = left * right
-	case "/":
-		ans = left / right
-	}
-	return ans
+	listener *net.TCPListener
+	clients  []*Client
 }
 
 func newClient(connection net.Conn, length int) *Client {
 	writer := bufio.NewWriter(connection)
 	reader := bufio.NewReader(connection)
+	ticker := time.NewTicker(wait * time.Second)
 
 	client := &Client{
 		conn:     connection,
 		idx:      length,
+		flag:	  false,
 		incoming: make(chan string),
 		outgoing: make(chan string),
-		Timeout:  1,
+		end:	  make(chan bool, 2),
+		ticker:	  ticker,
 		reader:   reader,
 		writer:   writer,
 	}
 
 	go client.read()
 	go client.write()
-	greeting := "Hello!\nI\'ll give you baaasic mathematic quiz. Let\'s begin!\n "
+	go client.timeouter()
+	greeting := "Hello!\nI'll give you baaasic mathematic quiz. Let's begin!\n "
 	quiz := make_quiz()
 	client.question = "quiz:" + quiz
 	client.outgoing <- greeting + quiz + " = ?\n"
 	return client
 }
 
+func (client *Client) timeouter() {
+	for {
+		select {
+			case <-client.ticker.C:
+				fmt.Println("tick!")
+				if !client.flag {
+					fmt.Println("false!")
+					client.outgoing <- "timeout!\n"
+					client.ticker.Stop()
+					client.close("Close by Client's timeout\n")
+					return
+				}
+				client.flag = false
+		}
+	}
+}
+
 func (client *Client) read() {
 	for {
-		if client.Timeout > 0 {
-			if err = conn.SetDeadline(time.Now().Add(client.Timeout)); err != nil {
-				client.outgoing <- ">>you are too late! m9(^A^) BYE!\n"
-				client.close("Close by client\' miss.\n")
+		select {
+			case <-client.end:
+				client.close("Close by Client's mistake\n")
 				return
-			}
+			default:
+				line, err := client.reader.ReadString('\n')
+				if err != nil {
+					client.close(err.Error())
+					return
+				}
+				client.flag = true
+				client.incoming <- line
+				fmt.Printf("[%s]Read:%s\n", client.conn.RemoteAddr(), line)
 		}
-		line, err := client.reader.ReadString('\n')
-		if err == io.EOF {
-			client.close("catch EOF. Close.\n")
-			return
-		}
-		if err != nil {
-			client.close("read error. Close.\n")
-			return
-		}
-		client.incoming <- line
-		fmt.Printf("[%s]Read:%s", client.conn.RemoteAddr(), line)
 	}
 }
 
 func (client *Client) write() {
-	for data := range client.outgoing {
+	for {
+		data := <-client.outgoing
 		if data == "KILL WRITER" {
 			fmt.Printf("[%s]KILL WRITER\n", client.conn.RemoteAddr())
 			return
 		}
-		client.writer.WriteString(data)
-		client.writer.Flush()
+		if _, err  := client.writer.WriteString(data); err != nil {
+			fmt.Printf("in writer WriteString: %s\n", err.Error())
+		}
+		if err  := client.writer.Flush(); err != nil {
+			fmt.Printf("in writer flush: %s\n", err.Error())
+		}
 		fmt.Printf("[%s]Write:%s\n", client.conn.RemoteAddr(), data)
 	}
 }
 
-func (client *Client) close(mes: string) {
-	fmt.Printf("[%s]%s", client.conn.RemoteAddr(), mes)
-	client.conn.Close()
+func (client *Client) close(mes string) {
+	if slt := str.Split(mes," use "); len(slt) > 1 && slt[1] ==  "of closed network connection" {
+		fmt.Println("in closed network conn")
+		return
+	}	
+	fmt.Printf("[%s]%s\n", client.conn.RemoteAddr(), mes)
 	client.outgoing <- "KILL WRITER"
+	client.conn.Close()
 }
 
 func newListener() *net.TCPListener {
@@ -145,7 +142,7 @@ func newTCPServer() *Server {
 	listener := newListener()
 	server := &Server{
 		listener: listener,
-		clients:  make([]*Client, 0),
+		clients:  make([]*Client, 10),
 		conn:     make(chan net.Conn),
 		incoming: make(chan string),
 		outgoing: make(chan string),
@@ -185,9 +182,13 @@ func (server *Server) addClient(conn net.Conn) {
 	server.clients = append(server.clients, client)
 	go func() {
 		for {
-			message := strconv.Itoa(client.idx) + ":" + <-client.incoming
-			server.incoming <- message
-			client.outgoing <- <-server.outgoing
+			select {
+			case income := <-client.incoming:
+				message := strconv.Itoa(client.idx) + ":" + income
+				server.incoming <- message
+			case outgo :=  <-server.outgoing:
+				client.outgoing <- outgo
+			}
 		}
 	}()
 }
@@ -199,16 +200,52 @@ func (server *Server) response(data string) {
 	if bfr[0] == "quiz" {
 		ans := strconv.Itoa(calc_quiz(bfr[1]))
 		next := make_quiz()
-		if strconv.Itoa(idx) + ":" + ans  + "\n" != data {
-			server.clients[idx].outgoing <- ">>you made a mistake! m9(^A^) BYE\n"
-			server.clients[idx].close("Close by client\'s mistake\n");
-			return
+		if strconv.Itoa(idx) + ":" + ans  + "\n" == data {
+			data = ">>correct! ok, next question!\n " + next
+			server.clients[idx].question = "quiz:" + next
+			data += " = ?\n"
+			server.outgoing <- data
+		} else {
+			server.outgoing <- ">>you made a mistake. bye!!\n"
+			server.clients[idx].end <- true
 		}
-		data = ">>correct! ok, next question!\n " + next
-		server.clients[idx].question = "quiz:" + next
 	}
-	data += " = ?\n"
-	server.outgoing <- data
+}
+
+func make_quiz() string {
+	rand.Seed(time.Now().UnixNano())
+	left := rand.Intn(100)
+	right := rand.Intn(100)
+	oper := " + "
+	switch operi := rand.Intn(4); operi {
+	case 1:
+		oper = " - "
+	case 2:
+		oper = " * "
+	case 3:
+		oper = " / "
+		left *= 3
+		right += 1
+	}
+	return strconv.Itoa(left) + oper + strconv.Itoa(right)
+}
+
+func calc_quiz(data string) int {
+	tkn := str.Split(data, " ")
+	left , err := strconv.Atoi(tkn[0])
+	checkError(err, "in calc_quiz: Atoi error!")
+	right , err2 := strconv.Atoi(tkn[2])
+	checkError(err2, "in calc_quiz: Atoi error!")
+	ans := left + right
+	switch tkn[1] {
+	case "-":
+		ans = left - right
+	case "*":
+		ans = left * right
+	case "/":
+		ans = left / right
+	}
+	return ans
 }
 
 func checkError(err error, msg string) {
