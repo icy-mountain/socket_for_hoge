@@ -3,27 +3,28 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"math/rand"
 	"net"
 	"os"
 	"strconv"
 	"time"
+	"math/rand"
+	"net/http"
+	"encoding/json"
 	str "strings"
-
-	// "golang.org/x/net/context"
 )
 
 const (
 	wait = 3
+	pass_line = 1
 )
 
 type Client struct {
 	idx      int
 	question string
 	flag	 bool
+	corrects int
 	incoming chan string
 	outgoing chan string
-	end		 chan bool
 	conn     net.Conn
 	ticker	 *time.Ticker
 	reader   *bufio.Reader
@@ -44,12 +45,11 @@ func newClient(connection net.Conn, length int) *Client {
 	ticker := time.NewTicker(wait * time.Second)
 
 	client := &Client{
-		conn:     connection,
 		idx:      length,
 		flag:	  false,
 		incoming: make(chan string),
-		outgoing: make(chan string),
-		end:	  make(chan bool, 2),
+		outgoing: make(chan string, 20),
+		conn:     connection,
 		ticker:	  ticker,
 		reader:   reader,
 		writer:   writer,
@@ -69,12 +69,10 @@ func (client *Client) timeouter() {
 	for {
 		select {
 			case <-client.ticker.C:
-				fmt.Println("tick!")
 				if !client.flag {
-					fmt.Println("false!")
-					client.outgoing <- "timeout!\n"
-					client.ticker.Stop()
-					client.close("Close by Client's timeout\n")
+					mes := "Close by Client's timeout\n"
+					farewell := ">> timeout!\n"
+					client.close(mes, farewell)
 					return
 				}
 				client.flag = false
@@ -84,48 +82,45 @@ func (client *Client) timeouter() {
 
 func (client *Client) read() {
 	for {
-		select {
-			case <-client.end:
-				client.close("Close by Client's mistake\n")
-				return
-			default:
-				line, err := client.reader.ReadString('\n')
-				if err != nil {
-					client.close(err.Error())
-					return
-				}
-				client.flag = true
-				client.incoming <- line
-				fmt.Printf("[%s]Read:%s\n", client.conn.RemoteAddr(), line)
+		line, err := client.reader.ReadString('\n')
+		if err != nil {
+			client.close(err.Error(), "")
+			return
 		}
+		client.flag = true
+		client.incoming <- line
+		fmt.Printf("[%s]Read:%s\n", client.conn.RemoteAddr(), line)
 	}
 }
 
 func (client *Client) write() {
-	for {
-		data := <-client.outgoing
-		if data == "KILL WRITER" {
-			fmt.Printf("[%s]KILL WRITER\n", client.conn.RemoteAddr())
+	for	data := range client.outgoing {
+		if data == "KILL CONNECTION" {
+			fmt.Printf("[%s]KILL CONNECTION\n", client.conn.RemoteAddr())
+			client.conn.Close()
+			client = nil
 			return
 		}
 		if _, err  := client.writer.WriteString(data); err != nil {
 			fmt.Printf("in writer WriteString: %s\n", err.Error())
+			return
 		}
 		if err  := client.writer.Flush(); err != nil {
 			fmt.Printf("in writer flush: %s\n", err.Error())
+			return
 		}
 		fmt.Printf("[%s]Write:%s\n", client.conn.RemoteAddr(), data)
 	}
 }
 
-func (client *Client) close(mes string) {
+func (client *Client) close(mes string, farewell string) {
 	if slt := str.Split(mes," use "); len(slt) > 1 && slt[1] ==  "of closed network connection" {
 		fmt.Println("in closed network conn")
-		return
-	}	
-	fmt.Printf("[%s]%s\n", client.conn.RemoteAddr(), mes)
-	client.outgoing <- "KILL WRITER"
-	client.conn.Close()
+	} else {
+		fmt.Printf("[%s]%s\n", client.conn.RemoteAddr(), mes)
+		client.outgoing <- farewell
+		client.outgoing <- "KILL CONNECTION"
+	}
 }
 
 func newListener() *net.TCPListener {
@@ -163,17 +158,14 @@ func (server *Server) acceptLoop() {
 
 func (server *Server) listen() {
 	fmt.Println("Ready For Listen")
-
-	go func() {
-		for {
-			select {
-			case conn := <-server.conn:
-				server.addClient(conn)
-			case data := <-server.incoming:
-				server.response(data)
-			}
+	for {
+		select {
+		case conn := <-server.conn:
+			server.addClient(conn)
+		case data := <-server.incoming:
+			server.response(data)
 		}
-	}()
+	}
 }
 
 func (server *Server) addClient(conn net.Conn) {
@@ -201,15 +193,43 @@ func (server *Server) response(data string) {
 		ans := strconv.Itoa(calc_quiz(bfr[1]))
 		next := make_quiz()
 		if strconv.Itoa(idx) + ":" + ans  + "\n" == data {
-			data = ">>correct! ok, next question!\n " + next
-			server.clients[idx].question = "quiz:" + next
-			data += " = ?\n"
-			server.outgoing <- data
+			server.clients[idx].corrects += 1
+			if server.clients[idx].corrects == pass_line {
+				mes := "Close by Client's. Success!! 88888\n"
+				farewell := "Congratulations!! this is flag:" + get_flag()
+				server.clients[idx].close(mes, farewell)
+			} else {
+				data = ">>correct! ok, next question!\n " + next
+				server.clients[idx].question = "quiz:" + next
+				data += " = ?\n"
+				server.clients[idx].outgoing <- data
+			}
 		} else {
-			server.outgoing <- ">>you made a mistake. bye!!\n"
-			server.clients[idx].end <- true
+			mes := "Close by Client's mistake.\n"
+			farewell := ">>you made a mistake. bye!!\n"
+			server.clients[idx].close(mes, farewell)
 		}
 	}
+}
+
+func get_flag() string {
+	type Query struct {
+		Genre	string `json:"genre"`
+		Num		string `json:"num"`
+		Caught	string `json:"caught"`
+		Flag	string `json:"flag"`
+	}
+	url := "https://evening-anchorage-52082.herokuapp.com/admin/get_row?pass=stickyfingers&genre=app&num=1"
+	resp, err := http.Get(url)
+	if err != nil {
+		fmt.Println("in get_flag http.Get error!:" + err.Error())
+	}
+	defer resp.Body.Close()
+	var q []Query
+	if err := json.NewDecoder(resp.Body).Decode(&q); err != nil {
+		fmt.Println("in get_flag Decode error!:" + err.Error())
+	}
+	return q[0].Flag
 }
 
 func make_quiz() string {
@@ -257,6 +277,6 @@ func checkError(err error, msg string) {
 
 func main() {
 	server := newTCPServer()
-	server.listen()
+	go server.listen()
 	server.acceptLoop()
 }
