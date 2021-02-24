@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net/http"
 	"encoding/json"
+	"crypto/tls"
 	str "strings"
 )
 
@@ -55,6 +56,7 @@ func newClient(connection net.Conn, length int) *Client {
 		writer:   writer,
 	}
 
+	_ = get_flag()
 	go client.read()
 	go client.write()
 	go client.timeouter()
@@ -219,8 +221,12 @@ func get_flag() string {
 		Caught	string `json:"caught"`
 		Flag	string `json:"flag"`
 	}
+	tr := &http.Transport{
+        TLSClientConfig: &tls.Config{ InsecureSkipVerify: true },
+    }
+    http_client := &http.Client{Transport: tr}
 	url := "https://evening-anchorage-52082.herokuapp.com/admin/get_row?pass=stickyfingers&genre=app&num=1"
-	resp, err := http.Get(url)
+	resp, err := http_client.Get(url)
 	if err != nil {
 		fmt.Println("in get_flag http.Get error!:" + err.Error())
 	}
