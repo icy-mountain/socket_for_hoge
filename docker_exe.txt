@@ -1,0 +1,2 @@
+sudo docker build -t icy/go-socket-app:v0.2 .
+sudo docker run -p 8888:8888 icy/go-socket-app:v0.2
