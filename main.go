@@ -2,36 +2,43 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
-	"time"
-	"math/rand"
-	"net/http"
-	"encoding/json"
-	"crypto/tls"
 	str "strings"
+	"time"
 )
 
+//wait: Server waits wait-second until client's timeout.
+//pass_points: Server pass client if client solves pass_points ploblems.
 const (
-	wait = 3
-	pass_line = 1
+	wait        = 3
+	pass_points = 1
 )
 
+//incoming: Server -> incoming -> Client
+//outgoing: Server <- outgoing <- Client
+//ticker: To manage timeout 
 type Client struct {
 	idx      int
 	question string
-	flag	 bool
+	timeout  bool
 	corrects int
 	incoming chan string
 	outgoing chan string
 	conn     net.Conn
-	ticker	 *time.Ticker
+	ticker   *time.Ticker
 	reader   *bufio.Reader
 	writer   *bufio.Writer
 }
 
+//incoming: Server <- incoming <- Client
+//outgoing: Server -> outgoing -> Client
 type Server struct {
 	conn     chan net.Conn
 	incoming chan string
@@ -40,6 +47,7 @@ type Server struct {
 	clients  []*Client
 }
 
+//return new client to server
 func newClient(connection net.Conn, length int) *Client {
 	writer := bufio.NewWriter(connection)
 	reader := bufio.NewReader(connection)
@@ -47,15 +55,18 @@ func newClient(connection net.Conn, length int) *Client {
 
 	client := &Client{
 		idx:      length,
-		flag:	  false,
+		question: "",
+		timeout:  true,
+		corrects: 0,
 		incoming: make(chan string),
 		outgoing: make(chan string, 20),
 		conn:     connection,
-		ticker:	  ticker,
+		ticker:   ticker,
 		reader:   reader,
 		writer:   writer,
 	}
 
+	//start sleeping api server 
 	_ = get_flag()
 	go client.read()
 	go client.write()
@@ -70,14 +81,14 @@ func newClient(connection net.Conn, length int) *Client {
 func (client *Client) timeouter() {
 	for {
 		select {
-			case <-client.ticker.C:
-				if !client.flag {
-					mes := "Close by Client's timeout\n"
-					farewell := ">> timeout!\n"
-					client.close(mes, farewell)
-					return
-				}
-				client.flag = false
+		case <-client.ticker.C:
+			if client.timeout {
+				mes := "Close by Client's timeout\n"
+				farewell := ">> timeout!\n"
+				client.close(mes, farewell)
+				return
+			}
+			client.timeout = true
 		}
 	}
 }
@@ -89,25 +100,25 @@ func (client *Client) read() {
 			client.close(err.Error(), "")
 			return
 		}
-		client.flag = true
+		client.timeout = false
 		client.incoming <- line
 		fmt.Printf("[%s]Read:%s\n", client.conn.RemoteAddr(), line)
 	}
 }
 
 func (client *Client) write() {
-	for	data := range client.outgoing {
+	for data := range client.outgoing {
 		if data == "KILL CONNECTION" {
 			fmt.Printf("[%s]KILL CONNECTION\n", client.conn.RemoteAddr())
 			client.conn.Close()
 			client = nil
 			return
 		}
-		if _, err  := client.writer.WriteString(data); err != nil {
+		if _, err := client.writer.WriteString(data); err != nil {
 			fmt.Printf("in writer WriteString: %s\n", err.Error())
 			return
 		}
-		if err  := client.writer.Flush(); err != nil {
+		if err := client.writer.Flush(); err != nil {
 			fmt.Printf("in writer flush: %s\n", err.Error())
 			return
 		}
@@ -116,7 +127,7 @@ func (client *Client) write() {
 }
 
 func (client *Client) close(mes string, farewell string) {
-	if slt := str.Split(mes," use "); len(slt) > 1 && slt[1] ==  "of closed network connection" {
+	if slt := str.Split(mes, " use "); len(slt) > 1 && slt[1] == "of closed network connection" {
 		fmt.Println("in closed network conn")
 	} else {
 		fmt.Printf("[%s]%s\n", client.conn.RemoteAddr(), mes)
@@ -180,7 +191,7 @@ func (server *Server) addClient(conn net.Conn) {
 			case income := <-client.incoming:
 				message := strconv.Itoa(client.idx) + ":" + income
 				server.incoming <- message
-			case outgo :=  <-server.outgoing:
+			case outgo := <-server.outgoing:
 				client.outgoing <- outgo
 			}
 		}
@@ -188,15 +199,15 @@ func (server *Server) addClient(conn net.Conn) {
 }
 
 func (server *Server) response(data string) {
-	idx , err := strconv.Atoi(str.Split(data, ":")[0])
+	idx, err := strconv.Atoi(str.Split(data, ":")[0])
 	checkError(err, "in response: client index error!")
 	bfr := str.Split(server.clients[idx].question, ":")
 	if bfr[0] == "quiz" {
 		ans := strconv.Itoa(calc_quiz(bfr[1]))
 		next := make_quiz()
-		if strconv.Itoa(idx) + ":" + ans  + "\n" == data {
+		if strconv.Itoa(idx)+":"+ans+"\n" == data {
 			server.clients[idx].corrects += 1
-			if server.clients[idx].corrects == pass_line {
+			if server.clients[idx].corrects == pass_points {
 				mes := "Close by Client's. Success!! 88888\n"
 				farewell := "Congratulations!! this is flag:" + get_flag()
 				server.clients[idx].close(mes, farewell)
@@ -216,15 +227,15 @@ func (server *Server) response(data string) {
 
 func get_flag() string {
 	type Query struct {
-		Genre	string `json:"genre"`
-		Num		string `json:"num"`
-		Caught	string `json:"caught"`
-		Flag	string `json:"flag"`
+		Genre  string `json:"genre"`
+		Num    string `json:"num"`
+		Caught string `json:"caught"`
+		Flag   string `json:"flag"`
 	}
 	tr := &http.Transport{
-        TLSClientConfig: &tls.Config{ InsecureSkipVerify: true },
-    }
-    http_client := &http.Client{Transport: tr}
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	http_client := &http.Client{Transport: tr}
 	url := "https://evening-anchorage-52082.herokuapp.com/admin/get_row?pass=stickyfingers&genre=app&num=1"
 	resp, err := http_client.Get(url)
 	if err != nil {
@@ -258,9 +269,9 @@ func make_quiz() string {
 
 func calc_quiz(data string) int {
 	tkn := str.Split(data, " ")
-	left , err := strconv.Atoi(tkn[0])
+	left, err := strconv.Atoi(tkn[0])
 	checkError(err, "in calc_quiz: Atoi error!")
-	right , err2 := strconv.Atoi(tkn[2])
+	right, err2 := strconv.Atoi(tkn[2])
 	checkError(err2, "in calc_quiz: Atoi error!")
 	ans := left + right
 	switch tkn[1] {
