@@ -12,12 +12,13 @@ import (
 	"strconv"
 	str "strings"
 	"time"
+	"context"
 )
 
-//wait: Server waits wait-second until client's timeout.
-//pass_points: Server pass client if client solves pass_points ploblems.
+//wait: Server waits wait-second until client's timeout. default 5
+//pass_points: Server pass client if client solves pass_points ploblems. default 100
 const (
-	wait        = 3
+	wait        = 5
 	pass_points = 1
 )
 
@@ -35,6 +36,7 @@ type Client struct {
 	ticker   *time.Ticker
 	reader   *bufio.Reader
 	writer   *bufio.Writer
+	cancel   context.CancelFunc
 }
 
 //incoming: Server <- incoming <- Client
@@ -48,11 +50,10 @@ type Server struct {
 }
 
 //return new client to server
-func newClient(connection net.Conn, length int) *Client {
-	writer := bufio.NewWriter(connection)
-	reader := bufio.NewReader(connection)
+func newClient(conn net.Conn, length int, ctx context.Context, cancel context.CancelFunc) *Client {
+	writer := bufio.NewWriter(conn)
+	reader := bufio.NewReader(conn)
 	ticker := time.NewTicker(wait * time.Second)
-
 	client := &Client{
 		idx:      length,
 		question: "",
@@ -60,17 +61,18 @@ func newClient(connection net.Conn, length int) *Client {
 		corrects: 0,
 		incoming: make(chan string),
 		outgoing: make(chan string, 20),
-		conn:     connection,
+		conn:     conn,
 		ticker:   ticker,
 		reader:   reader,
 		writer:   writer,
+		cancel:   cancel,
 	}
 
 	//start sleeping api server 
 	_ = get_flag()
-	go client.read()
-	go client.write()
-	go client.timeouter()
+	go client.read(ctx)
+	go client.write(ctx)
+	go client.timeouter(ctx)
 	greeting := "Hello!\nI'll give you baaasic mathematic quiz. Let's begin!\n "
 	quiz := make_quiz()
 	client.question = "quiz:" + quiz
@@ -78,7 +80,7 @@ func newClient(connection net.Conn, length int) *Client {
 	return client
 }
 
-func (client *Client) timeouter() {
+func (client *Client) timeouter(ctx context.Context) {
 	for {
 		select {
 		case <-client.ticker.C:
@@ -89,50 +91,59 @@ func (client *Client) timeouter() {
 				return
 			}
 			client.timeout = true
+		case <-ctx.Done():
+			return
 		}
 	}
 }
 
-func (client *Client) read() {
+func (client *Client) read(ctx context.Context) {
 	for {
-		line, err := client.reader.ReadString('\n')
-		if err != nil {
-			client.close(err.Error(), "")
+		select {
+		case <-ctx.Done():
 			return
+		default:
+			line, err := client.reader.ReadString('\n')
+			if err != nil {
+				client.close(err.Error(), "")
+				return
+			}
+			client.timeout = false
+			client.incoming <- line
+			fmt.Printf("[%s]Read:%s\n", client.conn.RemoteAddr(), line)
 		}
-		client.timeout = false
-		client.incoming <- line
-		fmt.Printf("[%s]Read:%s\n", client.conn.RemoteAddr(), line)
 	}
 }
 
-func (client *Client) write() {
-	for data := range client.outgoing {
-		if data == "KILL CONNECTION" {
-			fmt.Printf("[%s]KILL CONNECTION\n", client.conn.RemoteAddr())
-			client.conn.Close()
-			client = nil
-			return
+func (client *Client) write(ctx context.Context) {
+	for {
+		select {
+			case data := <-client.outgoing: 
+				if _, err := client.writer.WriteString(data); err != nil {
+					fmt.Printf("in writer WriteString: %s\n", err.Error())
+					return
+				}
+				if err := client.writer.Flush(); err != nil {
+					fmt.Printf("in writer flush: %s\n", err.Error())
+					return
+				}
+				fmt.Printf("[%s]Write:%s\n", client.conn.RemoteAddr(), data)
+			case <-ctx.Done():
+				fmt.Printf("[%s]KILL CONNECTION\n", client.conn.RemoteAddr())
+				client.conn.Close()
+				client = nil
+				return
 		}
-		if _, err := client.writer.WriteString(data); err != nil {
-			fmt.Printf("in writer WriteString: %s\n", err.Error())
-			return
-		}
-		if err := client.writer.Flush(); err != nil {
-			fmt.Printf("in writer flush: %s\n", err.Error())
-			return
-		}
-		fmt.Printf("[%s]Write:%s\n", client.conn.RemoteAddr(), data)
 	}
 }
 
 func (client *Client) close(mes string, farewell string) {
-	if slt := str.Split(mes, " use "); len(slt) > 1 && slt[1] == "of closed network connection" {
-		fmt.Println("in closed network conn")
+	if spt := str.Split(mes, " use "); len(spt) > 1 && spt[1] == "of closed network connection" {
+		fmt.Println("from read() in closed network conn err")
 	} else {
 		fmt.Printf("[%s]%s\n", client.conn.RemoteAddr(), mes)
 		client.outgoing <- farewell
-		client.outgoing <- "KILL CONNECTION"
+		client.cancel()
 	}
 }
 
@@ -182,8 +193,9 @@ func (server *Server) listen() {
 }
 
 func (server *Server) addClient(conn net.Conn) {
+	ctx, cancel := context.WithCancel(context.Background())
 	fmt.Printf("[%s]Accept\n", conn.RemoteAddr())
-	client := newClient(conn, len(server.clients))
+	client := newClient(conn, len(server.clients), ctx, cancel)
 	server.clients = append(server.clients, client)
 	go func() {
 		for {
@@ -193,6 +205,8 @@ func (server *Server) addClient(conn net.Conn) {
 				server.incoming <- message
 			case outgo := <-server.outgoing:
 				client.outgoing <- outgo
+			case <-ctx.Done():
+				return
 			}
 		}
 	}()
@@ -236,7 +250,7 @@ func get_flag() string {
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
 	http_client := &http.Client{Transport: tr}
-	url := "https://evening-anchorage-52082.herokuapp.com/admin/get_row?pass=stickyfingers&genre=app&num=1"
+	url := "https://evening-anchorage-52082.herokuapp.com/admin/get_row?pass=" + os.Getenv("CTF_PASS") + "&genre=app&num=1"
 	resp, err := http_client.Get(url)
 	if err != nil {
 		fmt.Println("in get_flag http.Get error!:" + err.Error())
@@ -293,6 +307,10 @@ func checkError(err error, msg string) {
 }
 
 func main() {
+	if os.Getenv("CTF_PASS") == "" {
+		fmt.Println("you need to set $CTF_PASS!!")
+		return
+	}
 	server := newTCPServer()
 	go server.listen()
 	server.acceptLoop()
