@@ -22,8 +22,8 @@ const (
 	pass_points = 1
 )
 
-//incoming: Server -> incoming -> Client
-//outgoing: Server <- outgoing <- Client
+//client' meaasage -> client.incoming -> server.incoming -> to server
+//server's message -> server.outgoing -> client's outgoing -> to client
 //ticker: To manage timeout 
 type Client struct {
 	idx      int
@@ -39,8 +39,6 @@ type Client struct {
 	cancel   context.CancelFunc
 }
 
-//incoming: Server <- incoming <- Client
-//outgoing: Server -> outgoing -> Client
 type Server struct {
 	conn     chan net.Conn
 	incoming chan string
