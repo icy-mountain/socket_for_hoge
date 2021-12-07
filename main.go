@@ -119,10 +119,12 @@ func (client *Client) write(ctx context.Context) {
 			case data := <-client.outgoing: 
 				if _, err := client.writer.WriteString(data); err != nil {
 					fmt.Printf("in writer WriteString: %s\n", err.Error())
+					client.cancel()
 					return
 				}
 				if err := client.writer.Flush(); err != nil {
 					fmt.Printf("in writer flush: %s\n", err.Error())
+					client.cancel()
 					return
 				}
 				fmt.Printf("[%s]Write:%s\n", client.conn.RemoteAddr(), data)
