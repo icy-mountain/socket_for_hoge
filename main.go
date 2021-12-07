@@ -23,7 +23,7 @@ const (
 )
 
 //client' meaasage -> client.incoming -> server.incoming -> to server
-//server's message -> server.outgoing -> client's outgoing -> to client
+//server's message -> server.outgoing -> client.outgoing -> to client
 //ticker: To manage timeout 
 type Client struct {
 	idx      int
