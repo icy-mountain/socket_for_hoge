@@ -78,6 +78,7 @@ func newClient(conn net.Conn, length int, ctx context.Context, cancel context.Ca
 	return client
 }
 
+//timeouter close connection if client "wait"sec over.
 func (client *Client) timeouter(ctx context.Context) {
 	for {
 		select {
@@ -192,6 +193,8 @@ func (server *Server) listen() {
 	}
 }
 
+//add client to server.
+//link server's incoming/outgoing and client's incoming/outgoing.
 func (server *Server) addClient(conn net.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	fmt.Printf("[%s]Accept\n", conn.RemoteAddr())
@@ -212,6 +215,7 @@ func (server *Server) addClient(conn net.Conn) {
 	}()
 }
 
+//make quiz message for client.
 func (server *Server) response(data string) {
 	idx, err := strconv.Atoi(str.Split(data, ":")[0])
 	checkError(err, "in response: client index error!")
