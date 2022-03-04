@@ -1,62 +1,59 @@
 package main
 
 import (
+	"os"
+	"fmt"
+	"net"
+	"time"
 	"bufio"
+	"strconv"
+	"context"
+	"net/http"
+	"math/rand"
 	"crypto/tls"
 	"encoding/json"
-	"fmt"
-	"math/rand"
-	"net"
-	"net/http"
-	"os"
-	"strconv"
 	str "strings"
-	"time"
-	"context"
 )
 
-//wait: Server waits wait-second until client's timeout. default 5
-//pass_points: Server pass client if client solves pass_points ploblems. default 100
+//kWait: Server waits "kWait" second until client's timeout. default 5
+//kPassPoints: Server pass client if client solves "kPassPoints" problems. default 100
 const (
-	wait        = 5
-	pass_points = 1
+	kWait        = 5
+	kPassPoints = 1
 )
 
-//client' meaasage -> client.incoming -> server.incoming -> to server
-//server's message -> server.outgoing -> client.outgoing -> to client
-//ticker: To manage timeout 
 type Client struct {
-	idx      int
-	question string
-	timeout  bool
-	corrects int
-	incoming chan string
-	outgoing chan string
-	conn     net.Conn
-	ticker   *time.Ticker
-	reader   *bufio.Reader
-	writer   *bufio.Writer
-	cancel   context.CancelFunc
+	idx      int			/* manage client by "idx" */
+	corrects int			/* count correct answers by "corrects" */
+	timeout  bool			/* timeout or not */
+	question string			/* problem text ask calculation */
+	incoming chan string	/* client' meaasage -> client.incoming -> server.incoming -> to server */
+	outgoing chan string	/* server's message -> server.outgoing -> client.outgoing -> to client */
+	conn     net.Conn		/* connection killed by client's problem-mistake or timeout */
+	ticker   *time.Ticker	/* to manage timeout */
+	reader   *bufio.Reader	/* use in client.read() */
+	writer   *bufio.Writer	/* use in client.write() */
+	cancel   context.CancelFunc /* call cancel in cilent.close(), client.write() */
 }
 
 type Server struct {
-	conn     chan net.Conn
-	incoming chan string
-	outgoing chan string
-	listener *net.TCPListener
-	clients  []*Client
+	conn_ch     chan net.Conn
+	incoming	chan string
+	outgoing 	chan string
+	listener 	*net.TCPListener
+	clients  	[]*Client
 }
 
-//return new client to server
+//NewClient: return new client to server
 func newClient(conn net.Conn, length int, ctx context.Context, cancel context.CancelFunc) *Client {
 	writer := bufio.NewWriter(conn)
 	reader := bufio.NewReader(conn)
-	ticker := time.NewTicker(wait * time.Second)
+	ticker := time.NewTicker(kWait * time.Second)
 	client := &Client{
 		idx:      length,
-		question: "",
-		timeout:  true,
 		corrects: 0,
+		timeout:  true,
+		question: "",
 		incoming: make(chan string),
 		outgoing: make(chan string, 20),
 		conn:     conn,
@@ -66,20 +63,19 @@ func newClient(conn net.Conn, length int, ctx context.Context, cancel context.Ca
 		cancel:   cancel,
 	}
 
-	//start sleeping api server 
-	_ = get_flag()
+	_ = getFlag() /* to wake up sleeping API sever */
 	go client.read(ctx)
 	go client.write(ctx)
-	go client.timeouter(ctx)
+	go client.timeOuter(ctx)
 	greeting := "Hello!\nI'll give you baaasic mathematic quiz. Let's begin!\n "
-	quiz := make_quiz()
+	quiz := makeQuiz()
 	client.question = "quiz:" + quiz
 	client.outgoing <- greeting + quiz + " = ?\n"
 	return client
 }
 
-//timeouter close connection if client "wait"sec over.
-func (client *Client) timeouter(ctx context.Context) {
+//timeOuter close connection if client "kWait"sec over.
+func (client *Client) timeOuter(ctx context.Context) {
 	for {
 		select {
 		case <-client.ticker.C:
@@ -161,11 +157,11 @@ func newListener() *net.TCPListener {
 func newTCPServer() *Server {
 	listener := newListener()
 	server := &Server{
-		listener: listener,
-		clients:  make([]*Client, 10),
-		conn:     make(chan net.Conn),
-		incoming: make(chan string),
-		outgoing: make(chan string),
+		conn_ch:    make(chan net.Conn),
+		incoming: 	make(chan string),
+		outgoing: 	make(chan string),
+		listener: 	listener,
+		clients:  	make([]*Client, 10),
 	}
 	return server
 }
@@ -177,7 +173,7 @@ func (server *Server) acceptLoop() {
 	for {
 		conn, err := server.listener.Accept()
 		checkError(err, "Accept Error")
-		server.conn <- conn
+		server.conn_ch <- conn
 	}
 }
 
@@ -185,7 +181,7 @@ func (server *Server) listen() {
 	fmt.Println("Ready For Listen")
 	for {
 		select {
-		case conn := <-server.conn:
+		case conn := <-server.conn_ch:
 			server.addClient(conn)
 		case data := <-server.incoming:
 			server.response(data)
@@ -215,35 +211,37 @@ func (server *Server) addClient(conn net.Conn) {
 	}()
 }
 
-//make quiz message for client.
 func (server *Server) response(data string) {
 	idx, err := strconv.Atoi(str.Split(data, ":")[0])
 	checkError(err, "in response: client index error!")
-	bfr := str.Split(server.clients[idx].question, ":")
-	if bfr[0] == "quiz" {
-		ans := strconv.Itoa(calc_quiz(bfr[1]))
-		next := make_quiz()
-		if strconv.Itoa(idx)+":"+ans+"\n" == data {
-			server.clients[idx].corrects += 1
-			if server.clients[idx].corrects == pass_points {
+	the_client := server.clients[idx]
+	foo := str.Split(the_client.question, ":")
+	mode := foo[0]
+	the_client_answer := foo[1]
+
+	if mode == "quiz" {
+		ans := strconv.Itoa(calcQuiz(the_client_answer))
+		next := makeQuiz()
+		if strconv.Itoa(idx) + ":" + ans + "\n" == data {
+			the_client.corrects += 1
+			if the_client.corrects == kPassPoints {
 				mes := "Close by Client's. Success!! 88888\n"
-				farewell := "Congratulations!! this is flag:" + get_flag()
-				server.clients[idx].close(mes, farewell)
+				farewell := "Congratulations!! this is flag:" + getFlag()
+				the_client.close(mes, farewell)
 			} else {
-				data = ">>correct! ok, next question!\n " + next
-				server.clients[idx].question = "quiz:" + next
-				data += " = ?\n"
-				server.clients[idx].outgoing <- data
+				mes := ">>correct! ok, next question!\n " + next + " = ?\n"
+				the_client.question = "quiz:" + next
+				the_client.outgoing <- mes
 			}
 		} else {
 			mes := "Close by Client's mistake.\n"
 			farewell := ">>you made a mistake. bye!!\n"
-			server.clients[idx].close(mes, farewell)
+			the_client.close(mes, farewell)
 		}
 	}
 }
 
-func get_flag() string {
+func getFlag() string {
 	type Query struct {
 		Genre  string `json:"genre"`
 		Num    string `json:"num"`
@@ -257,17 +255,17 @@ func get_flag() string {
 	url := "https://evening-anchorage-52082.herokuapp.com/admin/get_row?pass=" + os.Getenv("CTF_PASS") + "&genre=app&num=1"
 	resp, err := http_client.Get(url)
 	if err != nil {
-		fmt.Println("in get_flag http.Get error!:" + err.Error())
+		fmt.Println("in getFlag http.Get error!:" + err.Error())
 	}
 	defer resp.Body.Close()
 	var q []Query
 	if err := json.NewDecoder(resp.Body).Decode(&q); err != nil {
-		fmt.Println("in get_flag Decode error!:" + err.Error())
+		fmt.Println("in getFlag Decode error!:" + err.Error())
 	}
 	return q[0].Flag
 }
 
-func make_quiz() string {
+func makeQuiz() string {
 	rand.Seed(time.Now().UnixNano())
 	left := rand.Intn(100)
 	right := rand.Intn(100)
@@ -285,12 +283,13 @@ func make_quiz() string {
 	return strconv.Itoa(left) + oper + strconv.Itoa(right)
 }
 
-func calc_quiz(data string) int {
+// TODO: if Atoi error happen, return err. Don't panic().
+func calcQuiz(data string) int {
 	tkn := str.Split(data, " ")
 	left, err := strconv.Atoi(tkn[0])
-	checkError(err, "in calc_quiz: Atoi error!")
+	checkError(err, "in calcQuiz: Atoi error!")
 	right, err2 := strconv.Atoi(tkn[2])
-	checkError(err2, "in calc_quiz: Atoi error!")
+	checkError(err2, "in calcQuiz: Atoi error!")
 	ans := left + right
 	switch tkn[1] {
 	case "-":
@@ -305,8 +304,7 @@ func calc_quiz(data string) int {
 
 func checkError(err error, msg string) {
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s: %s", msg, err.Error())
-		os.Exit(1)
+		panic(fmt.Sprintf("%s: %s", msg, err.Error()))
 	}
 }
 
