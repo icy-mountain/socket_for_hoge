@@ -1,47 +1,47 @@
 package main
 
 import (
-	"os"
-	"fmt"
-	"net"
-	"time"
 	"bufio"
-	"strconv"
 	"context"
-	"net/http"
-	"math/rand"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
+	"math/rand"
+	"net"
+	"net/http"
+	"os"
+	"strconv"
 	str "strings"
+	"time"
 )
 
 //kWait: Server waits "kWait" second until client's timeout. default 5
 //kPassPoints: Server pass client if client solves "kPassPoints" problems. default 100
 const (
-	kWait        = 5
+	kWait       = 5
 	kPassPoints = 1
 )
 
 type Client struct {
-	idx      int			/* manage client by "idx" */
-	corrects int			/* count correct answers by "corrects" */
-	timeout  bool			/* timeout or not */
-	question string			/* problem text ask calculation */
-	incoming chan string	/* client' meaasage -> client.incoming -> server.incoming -> to server */
-	outgoing chan string	/* server's message -> server.outgoing -> client.outgoing -> to client */
-	conn     net.Conn		/* connection killed by client's problem-mistake or timeout */
-	ticker   *time.Ticker	/* to manage timeout */
-	reader   *bufio.Reader	/* use in client.read() */
-	writer   *bufio.Writer	/* use in client.write() */
+	idx      int                /* manage client by "idx" */
+	corrects int                /* count correct answers by "corrects" */
+	timeout  bool               /* timeout or not */
+	question string             /* problem text asking calculation */
+	incoming chan string        /* client' meaasage -> client.incoming -> server.incoming -> to server */
+	outgoing chan string        /* server's message -> server.outgoing -> client.outgoing -> to client */
+	conn     net.Conn           /* connection killed by client's problem-mistake or timeout */
+	ticker   *time.Ticker       /* to manage timeout */
+	reader   *bufio.Reader      /* use in client.read() */
+	writer   *bufio.Writer      /* use in client.write() */
 	cancel   context.CancelFunc /* call cancel in cilent.close(), client.write() */
 }
 
 type Server struct {
-	conn_ch     chan net.Conn
-	incoming	chan string
-	outgoing 	chan string
-	listener 	*net.TCPListener
-	clients  	[]*Client
+	conn_ch  chan net.Conn
+	incoming chan string
+	outgoing chan string
+	listener *net.TCPListener
+	clients  []*Client
 }
 
 //NewClient: return new client to server
@@ -113,23 +113,23 @@ func (client *Client) read(ctx context.Context) {
 func (client *Client) write(ctx context.Context) {
 	for {
 		select {
-			case data := <-client.outgoing: 
-				if _, err := client.writer.WriteString(data); err != nil {
-					fmt.Printf("in writer WriteString: %s\n", err.Error())
-					client.cancel()
-					return
-				}
-				if err := client.writer.Flush(); err != nil {
-					fmt.Printf("in writer flush: %s\n", err.Error())
-					client.cancel()
-					return
-				}
-				fmt.Printf("[%s]Write:%s\n", client.conn.RemoteAddr(), data)
-			case <-ctx.Done():
-				fmt.Printf("[%s]KILL CONNECTION\n", client.conn.RemoteAddr())
-				client.conn.Close()
-				client = nil
+		case data := <-client.outgoing:
+			if _, err := client.writer.WriteString(data); err != nil {
+				fmt.Printf("in writer WriteString: %s\n", err.Error())
+				client.cancel()
 				return
+			}
+			if err := client.writer.Flush(); err != nil {
+				fmt.Printf("in writer flush: %s\n", err.Error())
+				client.cancel()
+				return
+			}
+			fmt.Printf("[%s]Write:%s\n", client.conn.RemoteAddr(), data)
+		case <-ctx.Done():
+			fmt.Printf("[%s]KILL CONNECTION\n", client.conn.RemoteAddr())
+			client.conn.Close()
+			client = nil
+			return
 		}
 	}
 }
@@ -157,11 +157,11 @@ func newListener() *net.TCPListener {
 func newTCPServer() *Server {
 	listener := newListener()
 	server := &Server{
-		conn_ch:    make(chan net.Conn),
-		incoming: 	make(chan string),
-		outgoing: 	make(chan string),
-		listener: 	listener,
-		clients:  	make([]*Client, 10),
+		conn_ch:  make(chan net.Conn),
+		incoming: make(chan string),
+		outgoing: make(chan string),
+		listener: listener,
+		clients:  make([]*Client, 10),
 	}
 	return server
 }
@@ -217,27 +217,35 @@ func (server *Server) response(data string) {
 	the_client := server.clients[idx]
 	foo := str.Split(the_client.question, ":")
 	mode := foo[0]
-	the_client_answer := foo[1]
 
 	if mode == "quiz" {
-		ans := strconv.Itoa(calcQuiz(the_client_answer))
-		next := makeQuiz()
-		if strconv.Itoa(idx) + ":" + ans + "\n" == data {
-			the_client.corrects += 1
-			if the_client.corrects == kPassPoints {
-				mes := "Close by Client's. Success!! 88888\n"
-				farewell := "Congratulations!! this is flag:" + getFlag()
-				the_client.close(mes, farewell)
-			} else {
-				mes := ">>correct! ok, next question!\n " + next + " = ?\n"
-				the_client.question = "quiz:" + next
-				the_client.outgoing <- mes
-			}
-		} else {
-			mes := "Close by Client's mistake.\n"
-			farewell := ">>you made a mistake. bye!!\n"
+		responseQuiz(the_client, data)
+	}
+}
+
+func responseQuiz(the_client *Client, data string) {
+	idx, err := strconv.Atoi(str.Split(data, ":")[0])
+	checkError(err, "in response: client index error!")
+	prob_statement := str.Split(the_client.question, ":")[1]
+	ans := strconv.Itoa(calcQuiz(prob_statement))
+	ans = strconv.Itoa(idx)+":"+ans+"\n" 
+
+	if ans == data {
+		the_client.corrects += 1
+		if the_client.corrects == kPassPoints {
+			mes := "Close by Client's. Success!! 88888\n"
+			farewell := "Congratulations!! this is flag:" + getFlag()
 			the_client.close(mes, farewell)
+		} else {
+			next := makeQuiz()
+			mes := ">>correct! ok, next question!\n " + next + " = ?\n"
+			the_client.question = "quiz:" + next
+			the_client.outgoing <- mes
 		}
+	} else {
+		mes := "Close by Client's mistake.\n"
+		farewell := ">>you made a mistake. bye!!\n"
+		the_client.close(mes, farewell)
 	}
 }
 
