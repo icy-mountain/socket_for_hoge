@@ -19,7 +19,7 @@ import (
 //kPassPoints: Server pass client if client solves "kPassPoints" problems. default 100
 const (
 	kWait       = 5
-	kPassPoints = 1
+	kPassPoints = 10
 )
 
 type Client struct {
@@ -127,6 +127,8 @@ func (client *Client) write(ctx context.Context) {
 			fmt.Printf("[%s]Write:%s\n", client.conn.RemoteAddr(), data)
 		case <-ctx.Done():
 			fmt.Printf("[%s]KILL CONNECTION\n", client.conn.RemoteAddr())
+			close(client.incoming)
+			close(client.outgoing)	
 			client.conn.Close()
 			client = nil
 			return
